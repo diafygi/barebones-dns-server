@@ -120,7 +120,7 @@ def parse_RR(buf, buf_offset, is_question=False):
 
     # read the variable length name
     name_parts, buf_offset = read_name(buf, buf_offset)
-    RR['name'] = b".".join(name_parts)
+    RR['name'] = b".".join(name_parts).lower()
 
     # resource record type
     RR['type_int'] = int.from_bytes(buf[buf_offset:(buf_offset+2)], "big")
