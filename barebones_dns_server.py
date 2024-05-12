@@ -422,6 +422,10 @@ def handle_question(question, config):
                     if question['type'] == "*":
                         q_types = domain_logic.keys()
 
+                    # Include CNAME in A and AAAA request responses
+                    if question['type'] in ["A", "AAAA"]:
+                        q_types.append("CNAME")
+
                     # generate answer if there's a config for that query type (A, TXT, etc.)
                     for q_type in q_types:
                         for rr_rdata, rr_ttl in domain_logic.get(q_type, []):
