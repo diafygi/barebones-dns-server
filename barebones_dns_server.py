@@ -120,7 +120,7 @@ def parse_RR(buf, buf_offset, is_question=False):
 
     # read the variable length name
     name_parts, buf_offset = read_name(buf, buf_offset)
-    RR['name'] = b".".join(name_parts)
+    RR['name'] = b".".join(name_parts).lower()
 
     # resource record type
     RR['type_int'] = int.from_bytes(buf[buf_offset:(buf_offset+2)], "big")
@@ -447,6 +447,10 @@ def handle_question(question, config):
                     q_types = [question['type']]
                     if question['type'] == "*":
                         q_types = domain_logic.keys()
+
+                    # Include CNAME in A and AAAA request responses
+                    if question['type'] in ["A", "AAAA"]:
+                        q_types.append("CNAME")
 
                     # generate answer if there's a config for that query type (A, TXT, etc.)
                     for q_type in q_types:
