@@ -111,6 +111,27 @@ if __name__ == "__main__":
         server.serve_forever()
 ```
 
+## Example: Run your dns server at startup (using cron)
+
+`start.sh`:
+```
+#!/bin/bash
+cd /path/to/barebones-dns-server
+nohup python3 -m barebones_dns_server --host 0.0.0.0 --port 5353 --config myconfig 2>> /path/to/barebones_dns_server_udp.log &
+nohup python3 -m barebones_dns_server --host 0.0.0.0 --port 5353 --config myconfig --tcp 2>> /path/to/barebones_dns_server_tcp.log &
+```
+
+`stop.sh`:
+```
+#!/bin/bash
+pkill --full "barebones_dns_server"
+```
+
+Set in your cron (`crontab -e`):
+```
+@reboot /home/ubuntu/barebones-dns-server/start.sh
+```
+
 
 ## License
 

@@ -72,7 +72,7 @@ def read_name(overall_bytes, overall_offset, max_offset=None, end_offset=None):
     while True:
 
         # for character strings, they don't end in a zero length label, so the function is
-        # passed an ending offset to let us know when we're done 
+        # passed an ending offset to let us know when we're done
         if end_offset is not None and cur_offset >= end_offset:
             return labels, cur_offset
 
@@ -105,7 +105,7 @@ def read_name(overall_bytes, overall_offset, max_offset=None, end_offset=None):
 
 def parse_RR(buf, buf_offset, is_question=False):
     """
-    Parse a question or resource record (RR) entry into a dict. 
+    Parse a question or resource record (RR) entry into a dict.
     """
     RR = {
         "name": None,       # e.g. b"www.example.com"
@@ -204,6 +204,23 @@ def parse_RR(buf, buf_offset, is_question=False):
         RR['rdata']['expire' ] = int.from_bytes(buf[(buf_offset+12):(buf_offset+16)], "big")
         RR['rdata']['minimum'] = int.from_bytes(buf[(buf_offset+16):(buf_offset+20)], "big")
 
+    # CAA
+    # e.g. {"critical": True, "tag": "issuer", "value": "letsencrypt.org"}
+    elif RR['type'] == "CAA":
+        RR['rdata'] = {
+            "critical": None,
+            "tag": None,
+            "value": None,
+        }
+        caa_flags = int.from_bytes(buf[buf_offset:(buf_offset+1)], "big")
+        RR['rdata']['critical' ] = caa_flags >> 7
+        buf_offset += 1
+        tag_len = int.from_bytes(buf[buf_offset:(buf_offset+1)], "big")
+        buf_offset += 1
+        RR['rdata']['tag'] = buf[buf_offset:(buf_offset+tag_len)]
+        buf_offset += tag_len
+        RR['rdata']['value'] = buf[buf_offset:(orig_offset+RR['rdlength'])]
+
     # all other types are default to RDATA as just raw bytes
     # e.g. "rdata": b"\x01\xff...",
     else:
@@ -295,6 +312,15 @@ def rr_to_bytes(rr, is_question=False):
         rdata_bytes += rr['rdata']['expire'].to_bytes(4, byteorder="big")
         # SOA minimum
         rdata_bytes += rr['rdata']['minimum'].to_bytes(4, byteorder="big")
+
+    # CAA
+    elif rr['type'] == "CAA":
+        caa_flags = 0
+        caa_flags |= rr['rdata']['critical'] << 7
+        rdata_bytes += caa_flags.to_bytes(1, byteorder="big")
+        rdata_bytes += len(rr['rdata']['tag']).to_bytes(1, byteorder="big")
+        rdata_bytes += rr['rdata']['tag']
+        rdata_bytes += rr['rdata']['value']
 
     # all other types are default to RDATA as just raw bytes
     else:
@@ -437,7 +463,7 @@ def handle_question(question, config):
                     break
 
             # stop looping since we found a match on the authoritative domain
-            break 
+            break
 
     return answers, is_authoritative
 
@@ -479,6 +505,15 @@ def handle_dns_packet(packet_bytes, config, logger=LOGGER):
     if packet_dict['questions']:
         response_packet['questions'] = [packet_dict['questions'][0]]
         response_packet['answers'], is_authoritative = handle_question(packet_dict['questions'][0], config)
+        logger.info("Incoming query: name={}; type={}; num_answers={}".format(
+            packet_dict['questions'][0]['name'],
+            packet_dict['questions'][0]['type'],
+            len(response_packet['answers']),
+        ))
+
+    # don't respond if domain wasn't for an authoritative domain
+    if not is_authoritative:
+        return None
 
     # update response header metadata based on answer results
     response_packet['header']['aa'] = 1 if is_authoritative else 0
@@ -501,7 +536,22 @@ class BarebonesDNSUDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         incoming_packet, socket = self.request
         response_packet = handle_dns_packet(incoming_packet, self.DNS_CONFIG, logger=(self.DNS_LOGGER or LOGGER))
-        socket.sendto(response_packet, self.client_address)
+        if response_packet is not None:
+            socket.sendto(response_packet, self.client_address)
+
+
+class BarebonesDNSTCPHandler(socketserver.BaseRequestHandler):
+    """ Basic TCP request handler class """
+    DNS_CONFIG = None
+    DNS_LOGGER = None
+    def handle(self):
+        data = self.request.recv(100 * 1024)  # only handle first 100KB of dns request
+        incoming_len = int.from_bytes(data[0:2], byteorder="big")
+        incoming_packet = data[2:incoming_len]
+        response_packet = handle_dns_packet(incoming_packet, self.DNS_CONFIG, logger=(self.DNS_LOGGER or LOGGER))
+        if response_packet is not None:
+            resp_len_bytes = len(response_packet).to_bytes(2, byteorder="big")
+            self.request.sendall(resp_len_bytes + response_packet)
 
 
 # start server when module is run directly
@@ -512,15 +562,22 @@ if __name__ == "__main__":
     parser.add_argument('--port', default=5353, type=int)
     parser.add_argument('--config', default="example_config")
     parser.add_argument("--debug", action="store_const", const=logging.DEBUG)
+    parser.add_argument("--tcp", action="store_const", const=True)
     args = parser.parse_args()
 
     LOGGER.setLevel(args.debug or LOGGER.level)
-    LOGGER.info("Running DNS server on {}:{}...".format(args.host, args.port))
+    LOGGER.info("Running DNS server on {}:{} ({})...".format(
+        args.host,
+        args.port,
+        "tcp" if args.tcp else "udp",
+    ))
 
-    BarebonesDNSUDPHandler.DNS_CONFIG = importlib.import_module(args.config).DNS_CONFIG
-    BarebonesDNSUDPHandler.DNS_LOGGER = LOGGER
+    handler_class = BarebonesDNSTCPHandler if args.tcp else BarebonesDNSUDPHandler
+    handler_class.DNS_CONFIG = importlib.import_module(args.config).DNS_CONFIG
+    handler_class.DNS_LOGGER = LOGGER
 
-    socketserver.ForkingUDPServer.allow_reuse_address = True
-    with socketserver.ForkingUDPServer((args.host, args.port), BarebonesDNSUDPHandler) as server:
+    server_class = socketserver.ForkingTCPServer if args.tcp else socketserver.ForkingUDPServer
+    server_class.allow_reuse_address = True
+    with server_class((args.host, args.port), handler_class) as server:
         server.serve_forever()
 
